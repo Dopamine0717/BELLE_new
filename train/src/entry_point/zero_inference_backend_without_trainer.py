@@ -20,9 +20,9 @@ from typing import Optional
 from peft import PeftModel
 import gradio as gr
 
-from src.models.llama.modeling_llama import LlamaForCausalLM
-from src.models.generation_utils import GenerationMixin
-from src.utils import bind_methods_from_class_to_instance
+# from src.models.llama.modeling_llama import LlamaForCausalLM
+from generation_utils import GenerationMixin
+from utils import bind_methods_from_class_to_instance
 
 SEP_LINE = "=" * 20
 
@@ -51,7 +51,7 @@ class Arguments:
 
 
 def generate_prompt(input_text):
-    return input_text
+    return "Human: \n" + input_text + "\n\nAssistant: \n"
 
 
 def evaluate(
@@ -60,14 +60,14 @@ def evaluate(
     tokenizer: PreTrainedTokenizer,
     local_rank: int,
     input: str,
-    temperature=0.1,
-    top_p=0.75,
-    top_k=40,
-    num_beams=4,
-    do_sample=False,
-    max_new_tokens=128,
+    temperature=0.001,
+    top_p=0.85,
+    top_k=30,
+    num_beams=1,
+    do_sample=True,
+    max_new_tokens=512,
     min_new_tokens=1,
-    repetition_penalty=1.2,
+    repetition_penalty=1,
 ):
     prompt = generate_prompt(input)
 
@@ -75,8 +75,8 @@ def evaluate(
     print(f"local_rank: {local_rank}\nprompt:\n{prompt}")
     print(SEP_LINE)
 
-    input_ids = tokenizer.encode(
-        prompt, add_special_tokens=False, return_tensors="pt"
+    inputs = tokenizer(
+        prompt, add_special_tokens=False, return_tensors="pt", truncation=True
     ).to(device=local_rank)
 
     generation_config = GenerationConfig(
@@ -96,7 +96,8 @@ def evaluate(
     with torch.no_grad():
         try:
             generation_output = model.generate(
-                input_ids=input_ids,
+                input_ids=inputs['input_ids'],
+                attention_mask = inputs['attention_mask'],
                 generation_config=generation_config,
                 deepspeed_model=deepspeed_model,
                 synced_gpus=True,
@@ -154,7 +155,7 @@ def main():
         )
     else:
         tokenizer = AutoTokenizer.from_pretrained(args.ckpt_path)
-        tokenizer.add_special_tokens({"pad_token": tokenizer.unk_token})
+        # tokenizer.add_special_tokens({"pad_token": tokenizer.unk_token})
     tokenizer.padding_side = "left"
 
     # now a model can be loaded.
@@ -188,6 +189,8 @@ def main():
             "constrained_beam_search",
             "assisted_decoding",
             "generate",
+            "_get_generation_mode",
+            "_get_logits_warper",
         ],
     )
 
@@ -195,30 +198,30 @@ def main():
         fn=partial(evaluate, ds_engine.module, ds_engine, tokenizer, local_rank),
         inputs=[
             gr.components.Textbox(
-                lines=2, label="Input", placeholder="Welcome to the BELLE model"
+                lines=2, label="Input", placeholder="请输入您的问题"
             ),
-            gr.components.Slider(minimum=0, maximum=1, value=0.1, label="Temperature"),
-            gr.components.Slider(minimum=0, maximum=1, value=0.75, label="Top p"),
-            gr.components.Slider(
-                minimum=0, maximum=100, step=1, value=40, label="Top k"
-            ),
-            gr.components.Slider(
-                minimum=1, maximum=4, step=1, value=1, label="Beams Number"
-            ),
-            gr.components.Checkbox(value=False, label="Do sample"),
-            gr.components.Slider(
-                minimum=1, maximum=2000, step=10, value=512, label="Max New Tokens"
-            ),
-            gr.components.Slider(
-                minimum=1, maximum=300, step=10, value=1, label="Min New Tokens"
-            ),
-            gr.components.Slider(
-                minimum=1.0,
-                maximum=2.0,
-                step=0.1,
-                value=1.2,
-                label="Repetition Penalty",
-            ),
+            # gr.components.Slider(minimum=0, maximum=1, value=0.1, label="Temperature"),
+            # gr.components.Slider(minimum=0, maximum=1, value=0.75, label="Top p"),
+            # gr.components.Slider(
+            #     minimum=0, maximum=100, step=1, value=40, label="Top k"
+            # ),
+            # gr.components.Slider(
+            #     minimum=1, maximum=4, step=1, value=1, label="Beams Number"
+            # ),
+            # gr.components.Checkbox(value=False, label="Do sample"),
+            # gr.components.Slider(
+            #     minimum=1, maximum=2000, step=10, value=512, label="Max New Tokens"
+            # ),
+            # gr.components.Slider(
+            #     minimum=1, maximum=300, step=10, value=1, label="Min New Tokens"
+            # ),
+            # gr.components.Slider(
+            #     minimum=1.0,
+            #     maximum=2.0,
+            #     step=0.1,
+            #     value=1.2,
+            #     label="Repetition Penalty",
+            # ),
         ],
         outputs=[
             gr.components.Textbox(

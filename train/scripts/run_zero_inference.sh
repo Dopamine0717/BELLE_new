@@ -1,8 +1,8 @@
-export CUDA_VISIBLE_DEVICES='0,1,2,3,4,5,6,7'
+export CUDA_VISIBLE_DEVICES='0,1,2'
 export ABS_PATH=...
 export PYTHONPATH="$ABS_PATH/BELLE/train"
 
-ckpt_path=BELLE-2/BELLE-Llama2-13B-chat-0.4M
+ckpt_path=/data/huggingface/qwen2_0.5B
 infer_file=$ABS_PATH/BELLE/data/test_data/test_infer.jsonl
 
 cache_dir=hf_cache_dir

@@ -215,7 +215,7 @@ def main():
         )
     else:
         tokenizer = AutoTokenizer.from_pretrained(script_args.model_name)
-        tokenizer.add_special_tokens({"pad_token": tokenizer.unk_token})
+        # tokenizer.add_special_tokens({"pad_token": tokenizer.unk_token})
     tokenizer.padding_side = "left"
     print_rank_0(
         f"unk token: {tokenizer.unk_token}, "

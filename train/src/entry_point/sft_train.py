@@ -5,11 +5,13 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     HfArgumentParser,
-    LlamaTokenizer,
+    # LlamaTokenizer,
     TrainingArguments,
     set_seed,
+    AutoConfig,
+    AutoModel,
 )
-from peft import LoraConfig, get_peft_model, prepare_model_for_int8_training
+# from peft import LoraConfig, get_peft_model, prepare_model_for_int8_training
 from datasets import load_dataset
 import transformers
 import torch
@@ -23,18 +25,25 @@ import math
 import logging
 import json
 import sys
+import socket
+import subprocess
+from transformers.trainer_callback import TrainerCallback
 
-from src.utils import get_model_param_count
-from src.sample_generator import (
+from utils import get_model_param_count
+from sample_generator import (
     batch_grouped_sft_generate,
     generate_and_tokenize_prompt,
+    generate_and_tokenize_prompt_qwen,
+    generate_and_tokenize_prompt_qwen_gis
 )
-from src.models.llama.modeling_llama import LlamaForCausalLM
+# from modeling_llama import LlamaForCausalLM
 
 if version.parse(transformers.__version__) <= version.parse("4.30.2"):
-    from src.trainer import MyTrainer as Trainer
+    from trainer import MyTrainer as Trainer
 else:
     from transformers import Trainer
+
+# from trainer2 import CustomTrainer
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +155,11 @@ class TrainingArguments(TrainingArguments):
         },
     )
     do_train: bool = field(default=True, metadata={"help": "Whether to run training."})
+class SavePeftModelAtEndCallback(TrainerCallback):
+    def on_train_end(self, args, state, control, **kwargs):
+        peft_model_path = os.path.join(args.output_dir, "adapter_model")
+        kwargs["model"].save_pretrained(peft_model_path)
+        return control
 
 
 def print_rank_0(msg, log_file, rank=0):
@@ -155,11 +169,97 @@ def print_rank_0(msg, log_file, rank=0):
             f.write(msg + "\n")
 
 
+def init_slurm_env():
+    if 'SLURM_PROCID' in os.environ:
+        proc_id = int(os.environ['SLURM_PROCID'])
+        if proc_id==0:
+            print('Init dist using slurm!')
+            print("Job Id is {} on {} ".format(os.environ["SLURM_JOBID"], os.environ['SLURM_NODELIST']))
+
+        ntasks = int(os.environ['SLURM_NTASKS'])
+        # node_list = os.environ['SLURM_NODELIST']
+        node_list = os.environ['SLURM_STEP_NODELIST']
+        # node_list = os.environ['SLURM_STEP_NODELIST']
+        num_gpus = torch.cuda.device_count()
+        addr = subprocess.getoutput(
+            'scontrol show hostname {} | head -n1'.format(node_list))
+        jobid = os.environ["SLURM_JOBID"]
+        stepid = os.environ["SLURM_STEP_ID"]
+       
+
+        tcp_port = os.environ.get('MASTER_PORT', 9904)
+
+
+        os.environ['MASTER_PORT'] =str(tcp_port)
+        os.environ['MASTER_ADDR'] = addr
+        os.environ['WORLD_SIZE'] = str(ntasks)
+        os.environ['RANK'] = str(proc_id)
+        os.environ['LOCAL_RANK'] = str(proc_id % num_gpus)
+        os.environ['LOCAL_SIZE'] = str(num_gpus)
+
+        print('rank: {} world size: {} addr: {}  port: {}'.format(proc_id, ntasks, addr, os.environ['MASTER_PORT']))
+
+def maybe_zero_3(param, ignore_status=False, name=None):
+    from deepspeed import zero
+    from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+    if hasattr(param, "ds_id"):
+        if param.ds_status == ZeroParamStatus.NOT_AVAILABLE:
+            if not ignore_status:
+                logging.warning(f"{name}: param.ds_status != ZeroParamStatus.NOT_AVAILABLE: {param.ds_status}")
+        with zero.GatheredParameters([param]):
+            param = param.data.detach().cpu().clone()
+    else:
+        param = param.detach().cpu().clone()
+    return param
+
+
+# Borrowed from peft.utils.get_peft_model_state_dict
+def get_peft_state_maybe_zero_3(named_params, bias):
+    if bias == "none":
+        to_return = {k: t for k, t in named_params if "lora_" in k}
+    elif bias == "all":
+        to_return = {k: t for k, t in named_params if "lora_" in k or "bias" in k}
+    elif bias == "lora_only":
+        to_return = {}
+        maybe_lora_bias = {}
+        lora_bias_names = set()
+        for k, t in named_params:
+            if "lora_" in k:
+                to_return[k] = t
+                bias_name = k.split("lora_")[0] + "bias"
+                lora_bias_names.add(bias_name)
+            elif "bias" in k:
+                maybe_lora_bias[k] = t
+        for k, t in maybe_lora_bias:
+            if bias_name in lora_bias_names:
+                to_return[bias_name] = t
+    else:
+        raise NotImplementedError
+    to_return = {k: maybe_zero_3(v, name=k) for k, v in to_return.items()}
+    return to_return
+
+
+def get_peft_state_non_lora_maybe_zero_3(named_params, require_grad_only=True):
+    to_return = {k: t for k, t in named_params if "lora_" not in k}
+    if require_grad_only:
+        to_return = {k: t for k, t in to_return.items() if t.requires_grad}
+    to_return = {k: maybe_zero_3(v, ignore_status=True).cpu() for k, v in to_return.items()}
+    return to_return
+
+
+def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
+    to_return = {k: t for k, t in named_params if any(key_match in k for key_match in keys_to_match)}
+    to_return = {k: maybe_zero_3(v, ignore_status=True).cpu() for k, v in to_return.items()}
+    return to_return
+
+
 def main():
+    init_slurm_env()
     parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
     world_size = int(os.environ.get("WORLD_SIZE", 1))
+    ddp = world_size != 1
     global_rank = torch.distributed.get_rank()
     log_file = os.path.join(training_args.output_dir, "print_log.txt")
 
@@ -188,24 +288,24 @@ def main():
 
     # Detecting last checkpoint.
     last_checkpoint = None
-    if (
-        os.path.isdir(training_args.output_dir)
-        and training_args.do_train
-        and not training_args.overwrite_output_dir
-    ):
-        last_checkpoint = get_last_checkpoint(training_args.output_dir)
-        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
-            raise ValueError(
-                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
-                "Use --overwrite_output_dir to overcome."
-            )
-        elif (
-            last_checkpoint is not None and training_args.resume_from_checkpoint is None
-        ):
-            logger.info(
-                f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
-                "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
-            )
+    # if (
+    #     os.path.isdir(training_args.output_dir)
+    #     and training_args.do_train
+    #     and not training_args.overwrite_output_dir
+    # ):
+    #     last_checkpoint = get_last_checkpoint(training_args.output_dir)
+    #     if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
+    #         raise ValueError(
+    #             f"Output directory ({training_args.output_dir}) already exists and is not empty. "
+    #             "Use --overwrite_output_dir to overcome."
+    #         )
+    #     elif (
+    #         last_checkpoint is not None and training_args.resume_from_checkpoint is None
+    #     ):
+    #         logger.info(
+    #             f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
+    #             "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
+    #         )
 
     # Set seed before initializing model.
     set_seed(training_args.seed)
@@ -231,29 +331,33 @@ def main():
             torch_dtype=torch_dtype,
         )
     else:
-        if model_args.llama:
-            model = LlamaForCausalLM.from_pretrained(
-                model_args.model_name_or_path,
-                torch_dtype=torch_dtype,
-            )
-            model.config.use_flash_attention = model_args.use_flash_attention
+        # if 'llama' in model_args.model_name_or_path.lower():
+        #     model = LlamaForCausalLM.from_pretrained(
+        #         model_args.model_name_or_path,
+        #         torch_dtype=torch_dtype,
+        #     )
+        #     model.config.use_flash_attention = model_args.use_flash_attention
+        if 'glm' in model_args.model_name_or_path.lower():
+            config = AutoConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
+            config.pre_seq_len = None
+            config.prefix_projection = False
+            model = AutoModel.from_pretrained(model_args.model_name_or_path, config=config, trust_remote_code=True,empty_init=False)
         else:
             model = AutoModelForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
                 torch_dtype=torch_dtype,
             )
+            # model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2-0.5B")
 
-    if model_args.llama:
-        tokenizer = LlamaTokenizer.from_pretrained(model_args.model_name_or_path)
-        print_rank_0(
-            "Set the eos_token_id and bos_token_id of LLama model tokenizer",
-            log_file,
-            global_rank,
-        )
-        tokenizer.add_special_tokens({'bos_token': '<s>', 'eos_token': '</s>', 'unk_token': '<unk>', 'pad_token': '<unk>'})
+    if 'llama' in model_args.model_name_or_path.lower():
+        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
+        tokenizer.add_special_tokens({'pad_token': '<unk>'})
+    elif 'glm' in model_args.model_name_or_path.lower():
+        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
     else:
         tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
-        tokenizer.add_special_tokens({"pad_token": tokenizer.unk_token})
+        # tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-0.5B")
+        # tokenizer.add_special_tokens({"pad_token": tokenizer.unk_token})
     tokenizer.padding_side = "left"  # Allow batched inference
 
     print_rank_0(
@@ -320,67 +424,28 @@ def main():
         data_args.train_file
     )
 
-    with torch_distributed_zero_first(global_rank):
-        train_data = load_dataset(
-            "json", data_files=data_args.train_file, cache_dir=model_args.cache_dir
-        )
+    # with torch_distributed_zero_first(global_rank):
+    train_data = load_dataset(
+        "json", data_files=data_args.train_file, cache_dir=model_args.cache_dir
+    )
 
-        val_data = load_dataset(
-            "json", data_files=data_args.validation_file, cache_dir=model_args.cache_dir
-        )
+    val_data = load_dataset(
+        "json", data_files=data_args.validation_file, cache_dir=model_args.cache_dir
+    )
 
-        if model_args.use_flash_attention:
-            train_data = (
-                train_data["train"]
-                .shuffle()
-                .map(
-                    partial(
-                        batch_grouped_sft_generate,
-                        training_args.model_max_length,
-                        tokenizer,
-                    ),
-                    batched=True,
-                    desc=f"Grouping texts in chunks of {training_args.model_max_length}",
-                    remove_columns=["id", "conversations"],
-                )
-            )
-
-            val_data = (
-                val_data["train"]
-                .map(
-                    partial(
-                        batch_grouped_sft_generate,
-                        training_args.model_max_length,
-                        tokenizer,
-                    ),
-                    batched=True,
-                    desc=f"Grouping texts in chunks of {training_args.model_max_length}",
-                    remove_columns=["id", "conversations"],
-                )
-            )
+    if model_args.use_flash_attention:
+        train_data = (train_data["train"].shuffle().map(partial(batch_grouped_sft_generate,training_args.model_max_length,tokenizer,),batched=True,desc=f"Grouping texts in chunks of {training_args.model_max_length}",remove_columns=["id", "conversations"],))
+        val_data = (val_data["train"].map(partial(batch_grouped_sft_generate,training_args.model_max_length,tokenizer,),batched=True,desc=f"Grouping texts in chunks of {training_args.model_max_length}",remove_columns=["id", "conversations"],))
+    elif 'qwen' in model_args.model_name_or_path.lower():
+        if 'gis' in data_args.train_file:
+            train_data = (train_data["train"].shuffle().map(partial(generate_and_tokenize_prompt_qwen_gis,training_args.model_max_length,tokenizer)))
+            val_data = (val_data["train"].map(partial(generate_and_tokenize_prompt_qwen_gis,training_args.model_max_length,tokenizer)))
         else:
-            train_data = (
-                train_data["train"]
-                .shuffle()
-                .map(
-                    partial(
-                        generate_and_tokenize_prompt,
-                        training_args.model_max_length,
-                        tokenizer,
-                    )
-                )
-            )
-
-            val_data = (
-                val_data["train"]
-                .map(
-                    partial(
-                        generate_and_tokenize_prompt,
-                        training_args.model_max_length,
-                        tokenizer,
-                    )
-                )
-            )
+            train_data = (train_data["train"].shuffle().map(partial(generate_and_tokenize_prompt_qwen,training_args.model_max_length,tokenizer)))
+            val_data = (val_data["train"].map(partial(generate_and_tokenize_prompt_qwen,training_args.model_max_length,tokenizer)))
+    else:
+        train_data = (train_data["train"].shuffle().map(partial(generate_and_tokenize_prompt,training_args.model_max_length,tokenizer)))
+        val_data = (val_data["train"].map(partial(generate_and_tokenize_prompt,training_args.model_max_length,tokenizer)))
 
     for i in range(2):
         print_rank_0(
@@ -438,16 +503,31 @@ def main():
     # https://huggingface.co/docs/accelerate/usage_guides/deepspeed
     # https://huggingface.co/transformers/v4.10.1/main_classes/deepspeed.html
     # https://github.com/tatsu-lab/stanford_alpaca/issues/176
-    trainer = Trainer(
-        model=model,
-        tokenizer=tokenizer,
-        args=training_args,
-        train_dataset=train_data,
-        eval_dataset=val_data,
-        data_collator=transformers.DataCollatorForSeq2Seq(
-            tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
-        ),
-    )
+    if 'glm' in model_args.model_name_or_path.lower(): # 使用的已经修改的custom trainer
+        label_pad_token_id = -100 if training_args.ignore_pad_token_for_loss else tokenizer.pad_token_id
+        trainer = CustomTrainer(
+            model=model,  # 输入的模型就是直接automodel加载出来的glm
+            args=training_args,  
+            train_dataset=train_data,
+            eval_dataset=val_data,
+            data_collator=transformers.DataCollatorForSeq2Seq(tokenizer,model=model,pad_to_multiple_of=None, 
+                                                            label_pad_token_id=label_pad_token_id,
+                                                            return_tensors="pt", 
+                                                            padding=True, 
+                                                            #max_length=training_args.model_max_length
+                                                              ),
+        )
+    else:
+        trainer = Trainer(
+            model=model,
+            tokenizer=tokenizer,
+            args=training_args,
+            train_dataset=train_data,
+            eval_dataset=val_data,
+            data_collator=transformers.DataCollatorForSeq2Seq(
+                tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
+            ),
+        )
 
     print_rank_0(
         f"Using {training_args.half_precision_backend} half precision backend",

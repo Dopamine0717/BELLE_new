@@ -12,3 +12,8 @@ infer_res
 wandb
 hf_cache_dir
 data
+train/hf_power_cache_dir
+flagged
+train/workdirs
+test.json
+hf_power_cache_dir/

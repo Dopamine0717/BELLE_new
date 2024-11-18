@@ -22,10 +22,13 @@ import os
 import logging
 import sys
 import pandas as pd
-from src.models.llama.modeling_llama import LlamaForCausalLM
+# from src.models.llama.modeling_llama import LlamaForCausalLM
 
-from src.sample_generator import inference_generate
-from src.trainer import MySeq2SeqTrainer as Seq2SeqTrainer
+from sample_generator import inference_generate
+from trainer import MySeq2SeqTrainer as Seq2SeqTrainer
+from utils import bind_methods_from_class_to_instance
+from generation_utils import GenerationMixin
+
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +243,7 @@ def main():
         )
     else:
         tokenizer = AutoTokenizer.from_pretrained(model_args.ckpt_path)
-        tokenizer.add_special_tokens({"pad_token": tokenizer.unk_token})
+        # tokenizer.add_special_tokens({"pad_token": tokenizer.unk_token})
     tokenizer.padding_side = "left"  # Allow batched inference
 
     if model_args.llama:
@@ -323,6 +326,14 @@ def main():
     )
 
     training_args.generation_config = HFGenerationConfig(**generation_config)
+    bind_methods_from_class_to_instance(
+        model,
+        GenerationMixin,
+        include=[
+            "_get_generation_mode",
+            "_get_logits_warper",
+        ],
+    )
     # Trainer
     # https://github.com/huggingface/transformers/blob/main/src/transformers/training_args.py
     # https://github.com/huggingface/transformers/blob/main/src/transformers/data/data_collator.py

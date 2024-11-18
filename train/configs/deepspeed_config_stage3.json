@@ -1,36 +1,26 @@
 {
     "zero_optimization": {
         "stage": 3,
-        "allgather_partitions": true,
-        "allgather_bucket_size": 5e8,
-        "reduce_scatter": true,
-        "reduce_bucket_size": "auto",
+        "offload_optimizer": {
+            "device": "cpu",
+            "pin_memory": true
+        },
+        "offload_param": {
+            "device": "cpu",
+            "pin_memory": true
+        },
         "overlap_comm": true,
         "contiguous_gradients": true,
-        "sub_group_size": 0,
-        "stage3_prefetch_bucket_size": 0,
-        "stage3_param_persistence_threshold": 0,
-        "stage3_max_live_parameters": 0,
-        "stage3_max_reuse_distance": 0,
-        "stage3_gather_16bit_weights_on_model_save": true,
-        "offload_param": {
-            "device": "cpu"
-        },
-        "offload_optimizer": {
-            "device": "cpu"
-        }
-    },
-    "scheduler": {
-        "type": "WarmupDecayLR",
-        "params": {
-            "warmup_min_lr": "auto",
-            "warmup_max_lr": "auto",
-            "warmup_num_steps": "auto",
-            "total_num_steps": "auto"
-        }
+        "sub_group_size": 1e9,
+        "reduce_bucket_size": "auto",
+        "stage3_prefetch_bucket_size": "auto",
+        "stage3_param_persistence_threshold": "auto",
+        "stage3_max_live_parameters": 1e9,
+        "stage3_max_reuse_distance": 1e9,
+        "stage3_gather_16bit_weights_on_model_save": true
     },
     "fp16": {
-        "enabled": false,
+        "enabled": true,
         "auto_cast": false,
         "loss_scale": 0,
         "loss_scale_window": 1000,
@@ -39,21 +29,18 @@
         "min_loss_scale": 1
     },
     "bf16": {
-        "enabled": true
+        "enabled": false
     },
     "optimizer": {
         "type": "AdamW",
         "params": {
-            "lr": "auto",
-            "weight_decay": "auto",
-            "betas": "auto",
-            "eps": "auto",
-            "torch_adam": true,
-            "adam_w_mode": true
+          "lr": "auto",
+          "weight_decay": "auto",
+          "torch_adam": true,
+          "adam_w_mode": true
         }
-    },
+      },
     "gradient_accumulation_steps": "auto",
-    "gradient_clipping": "auto",
     "steps_per_print": 1000,
     "train_batch_size": "auto",
     "train_micro_batch_size_per_gpu": "auto",
