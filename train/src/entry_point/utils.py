@@ -7,7 +7,7 @@ from tqdm import tqdm
 from transformers import PreTrainedModel, PreTrainedTokenizer
 import deepspeed
 from accelerate import Accelerator
-from transformers.deepspeed import is_deepspeed_zero3_enabled
+from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from deepspeed.runtime.engine import DeepSpeedEngine
 import torch
 
