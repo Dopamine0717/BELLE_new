@@ -17,3 +17,5 @@ flagged
 train/workdirs
 test.json
 hf_power_cache_dir/
+gradios/log.txt
+.gradio/
