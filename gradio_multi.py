@@ -5,29 +5,37 @@ from gradios.utils import load_model_on_gpus
 import time
 import torch
 from threading import Thread
+import argparse
 
-
+parser = argparse.ArgumentParser()
+parser.add_argument("model_path",
+                    type=str,
+                    default="/mnt/afs/luohaichen/models/power_qwen1.5_lr1e-5_epoch1_bs256_1100k")
+parser.add_argument("--port",
+                    type=int,
+                    default=6206)
+args = parser.parse_args()
 # 日志模块
-log_path = open("/data/luohaichen/BELLE/gradios/log.txt", "a+") 
+log_path = open("gradios/log.txt", "a+") 
 def writelog(logpath, history):
     logpath.write(f'history: {history}\n')
     logpath.flush()
 
 
 # 主程序
-model_path='/data/luohaichen/power_qwen1.5_lr1e-5_epoch1_bs256_1100k/'
-# model_path='/data/huggingface/qwen2_0.5B/'
+# model_path='/mnt/afs/luohaichen/models/power_qwen1.5_lr1e-5_epoch1_bs256_1100k'
+model_path=args.model_path
 
 
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 #model = AutoModel.from_pretrained(model_path, trust_remote_code=True).cuda()
 # 多显卡支持，使用下面两行代替上面一行，将num_gpus改为你实际的显卡数量
-# model = AutoModelForCausalLM.from_pretrained(
-#     model_path,
-#     torch_dtype="auto",
-#     device_map="auto"
-# )
-model = load_model_on_gpus(model_path, num_gpus=3,base_id=0,multi_number=1, torch_dtype=torch.float16)
+model = AutoModelForCausalLM.from_pretrained(
+    model_path,
+    torch_dtype=torch.bfloat16,
+    device_map="auto"
+)
+# model = load_model_on_gpus(model_path, num_gpus=3,base_id=0,multi_number=1, torch_dtype=torch.float16)
 model = model.eval()
 
 streamer = TextIteratorStreamer(tokenizer)
@@ -103,34 +111,37 @@ def predict(input, chatbot):
     for val in chatbot:
         prompt += "<|im_start|>Human: \n" + val[0] + "<|im_end|>\n<|im_start|>Assistant: \n"+val[1]+"<|im_end|>\n"
     prompt += "<|im_start|>Human: \n" + input + "<|im_end|>\n<|im_start|>Assistant: \n"
+    prompt = prompt.replace('<p>','').replace('</p>','')
     inputs = tokenizer(prompt, add_special_tokens=False, return_tensors="pt", truncation=True).to(model.device)
     
-    # chatbot.append([input, ''])
-    # model_config = dict(
-    #             input_ids = inputs["input_ids"], 
-    #             attention_mask = inputs['attention_mask'],
-    #             **generation_config,
-    #             streamer = streamer
-    #         )
-    # t = Thread(target=model.generate, kwargs=model_config)
-    # t.start()
-    # response  = ""
-    # for new_token in streamer:
-    #     # if new_token != '<':
-    #     response += new_token
-    #     chatbot[-1] = [input,response[len(prompt):]]
-    #     yield chatbot, history, past_key_values
-    # writelog(log_path, history)
+    chatbot.append([input, ''])
+    model_config = dict(
+                input_ids = inputs["input_ids"], 
+                attention_mask = inputs['attention_mask'],
+                **generation_config,
+                streamer = streamer
+            )
+    t = Thread(target=model.generate, kwargs=model_config)
+    t.start()
+    response  = ""
+    for new_token in streamer:
+        # if new_token != '<':
+        response += new_token
+        output = response[len(prompt):].replace('<|im_end|>','')
+        chatbot[-1] = [input,output]
+        # chatbot[-1] = [input,response]
+        yield "", chatbot
+    writelog(log_path, chatbot)
     
-    generated_ids = model.generate(
-    input_ids=inputs['input_ids'],
-    attention_mask = inputs['attention_mask'],
-    **generation_config
-    )
-    generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs['input_ids'], generated_ids)]
-    response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-    chatbot.append((input, response))
-    return chatbot
+    # generated_ids = model.generate(
+    # input_ids=inputs['input_ids'],
+    # attention_mask = inputs['attention_mask'],
+    # **generation_config
+    # )
+    # generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs['input_ids'], generated_ids)]
+    # response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    # chatbot.append((input, response))
+    # return chatbot
 
 
 def reset_user_input():
@@ -230,16 +241,16 @@ with gr.Blocks() as demo:
     # emptyBtn.click(reset_state, outputs=[chatbot, history, past_key_values], show_progress=True)
 
     user_input.submit(predict, [user_input, chatbot],
-                    [chatbot], show_progress=True)
+                    [user_input, chatbot], show_progress=True)
     submitBtn.click(predict, [user_input, chatbot],
-                    [chatbot], show_progress=True)
+                    [user_input, chatbot], show_progress=True)
     # submitBtn.click(reset_user_input, [], [user_input])
 
-    emptyBtn.click(reset_state, outputs=[chatbot], show_progress=True)
+    emptyBtn.click(reset_state, outputs=[chatbot], show_progress=True, queue=False)
 
 if __name__ == '__main__':
     index = 0
     gr.close_all()
     demo.title = "人工智能助手"
     # demo.queue(concurrency_count=2)
-    demo.queue().launch(share=False, inbrowser=True,server_name='0.0.0.0',server_port=6206)
+    demo.queue().launch(share=True, inbrowser=True,server_name='0.0.0.0',server_port=args.port)

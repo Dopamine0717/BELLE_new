@@ -258,4 +258,4 @@ if __name__ == '__main__':
     gr.close_all()
     demo.title = "人工智能助手"
     # demo.queue(concurrency_count=2)
-    demo.queue().launch(share=False, inbrowser=True,server_name='0.0.0.0',server_port=6206) 
+    demo.queue().launch(share=False, inbrowser=True,server_name='0.0.0.0',server_port=6206)
