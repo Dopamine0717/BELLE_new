@@ -254,7 +254,7 @@ def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
 
 
 def main():
-    init_slurm_env()
+    # init_slurm_env()
     parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
@@ -467,7 +467,7 @@ def main():
     # train steps
     t_total = math.ceil(training_nums / batch_size) * training_args.num_train_epochs
     # eval steps
-    training_args.eval_steps = max(t_total // (training_args.num_train_epochs * 4), 5)
+    # training_args.eval_steps = max(t_total // (training_args.num_train_epochs * 4), 5)
     # save steps
     training_args.save_steps = training_args.eval_steps
     training_args.warmup_steps = (
