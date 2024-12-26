@@ -12,9 +12,9 @@ validation_file=${9:-'power_conv_dev.json'}
 
 export HF_HOME=/mnt/afs/luohaichen/hf_home
 mkdir -p ${output_dir}
-cache_dir=hf_power_cache_dir
+cache_dir=/mnt/afs/luohaichen/hf_power_cache_dir
 mkdir -p ${cache_dir}
-cutoff_len=2048
+cutoff_len=1024
 set -x 
 OUTPUT=$output_dir
 now=$(date +"%Y%m%d_%H%M%S")
@@ -45,9 +45,9 @@ torchrun --nproc_per_node=$GPUS --master_port=39718 \
     --cache_dir ${cache_dir} \
     --output_dir ${output_dir} \
     --report_to "none" \
-    --torch_dtype "float16" \
-    --fp16 \
+    --torch_dtype "bfloat16" \
+    --bf16 \
     --eval_steps 500 \
     > $OUTPUT/$now.log 2>&1 \
    # --use_flash_attention
-   # --resume_from_checkpoint ...
+   # --resume_from_checkpoint ${output_dir} \
